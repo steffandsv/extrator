@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>FIOMB — Painel Web</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="/styles.css" rel="stylesheet">
+</head>
+<body>
+  <div class="scanlines"></div>
+  <header>
+    <h1><span>FIOMB</span> <em>EXTRATOR</em></h1>
+    <p>Node + Puppeteer + MySQL · Multiworker · Painel Web</p>
+  </header>
+
+  <section class="controls card">
+    <div class="row">
+      <button id="btnAll">▶ Atualizar TODAS</button>
+      <input id="whereInput" placeholder="municipios.sg_uf = sp AND DS_LABEL IS NOT NULL">
+      <button id="btnWhere">▶ Atualizar com WHERE</button>
+    </div>
+    <div class="row">
+      <button id="btnLast">🕒 Última atualização</button>
+      <button id="btnStats">📈 Estatísticas</button>
+      <label class="token">
+        Token <input id="tokenInput" placeholder="X-Auth-Token (se configurado)">
+      </label>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card kpis">
+      <h3>Progresso</h3>
+      <div class="progress"><div id="progressBar"></div></div>
+      <div class="kpi-row">
+        <div><span id="kCities">0</span><small>Cidades</small></div>
+        <div><span id="kNew">0</span><small>Novas</small></div>
+        <div><span id="kUpd">0</span><small>Atualizadas</small></div>
+      </div>
+    </div>
+
+    <div class="card ranks">
+      <h3>Top cidades (sessão)</h3>
+      <div class="rank-cols">
+        <div>
+          <h4>Por novas</h4>
+          <ol id="topNewList"></ol>
+        </div>
+        <div>
+          <h4>Por encontrados</h4>
+          <ol id="topFoundList"></ol>
+        </div>
+      </div>
+    </div>
+
+    <div class="card logs">
+      <h3>Logs</h3>
+      <div id="logs" class="logs-body"></div>
+      <div id="downloads" class="downloads hidden">
+        <a id="dlLog" href="#">Baixar .ndjson</a>
+        <a id="dlSummary" href="#">Baixar summary.json</a>
+        <a id="dlZip" href="#">Baixar .zip</a>
+      </div>
+    </div>
+
+    <div class="card side">
+      <h3>Resumo</h3>
+      <div id="summaryBox" class="mono"></div>
+
+      <h3>Erros</h3>
+      <ul id="errList"></ul>
+
+      <h3>Sem novidades</h3>
+      <ul id="zeroList"></ul>
+    </div>
+  </section>
+
+  <section class="card sessions">
+    <h3>Sessões</h3>
+    <table id="sessTable">
+      <thead><tr><th>ID</th><th>Rótulo</th><th>Status</th><th>Início</th><th>Fim</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <footer>
+    <small>FIOMB · painel web — tema <em>hacker</em> — © você</small>
+  </footer>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

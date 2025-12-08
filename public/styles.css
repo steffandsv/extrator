@@ -1,0 +1,135 @@
+:root{
+  --bg:#050505;
+  --green:#12ff7b;
+  --green-d:#0bd267;
+  --text:#b8ffda;
+  --muted:#7bd3a5;
+  --red:#ff466b;
+  --yellow:#ffd75a;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font:14px/1.5 "Fira Code",Consolas,Monaco,monospace;
+  overflow-x:hidden;
+}
+.scanlines{
+  pointer-events:none; position:fixed; inset:0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0,0,0,.15),
+    rgba(0,0,0,.15) 2px,
+    transparent 2px,
+    transparent 4px
+  );
+  opacity:.25; z-index:0;
+}
+header{
+  z-index:1; position:relative; padding:24px; text-align:center;
+}
+header h1{
+  margin:0; font-size:48px; letter-spacing:2px; color:var(--green);
+  text-shadow:0 0 8px var(--green);
+}
+header h1 em{font-style:normal; color:var(--text)}
+header p{margin:6px 0 0;color:var(--muted)}
+.card{
+  background:#0a0a0a;
+  border:1px solid #0b4022;
+  border-radius:8px;
+  padding:14px;
+  position:relative;
+  box-shadow:0 0 24px rgba(18,255,123,0.06),
+             inset 0 0 60px rgba(18,255,123,0.03);
+}
+.controls{margin:0 14px}
+.controls .row{display:flex; gap:10px; flex-wrap:wrap}
+.controls input{
+  flex:1;
+  background:#000; color:var(--text);
+  border:1px solid #0b4022; border-radius:6px;
+  padding:10px 12px;
+}
+.controls button{
+  background:#0e2f1c; color:var(--green);
+  border:1px solid #0b4022; border-radius:6px;
+  padding:10px 14px; cursor:pointer;
+  text-shadow:0 0 6px var(--green);
+}
+.controls button:hover{ background:#114025 }
+.controls .token input{ width:240px }
+.grid{
+  display:grid; gap:14px; padding:14px;
+  grid-template-columns: 2fr 2fr 3fr 2fr;
+}
+.kpis .progress{
+  background:#000; border:1px solid #0b4022;
+  height:14px; border-radius:8px; overflow:hidden;
+}
+.kpis #progressBar{
+  height:100%; width:0%;
+  background:linear-gradient(90deg, var(--green), var(--green-d));
+  box-shadow:0 0 12px var(--green);
+}
+.kpi-row{ display:flex; gap:20px; margin-top:10px }
+.kpi-row span{ font-size:22px; color:var(--green) }
+
+.ranks h3{margin-top:0}
+.rank-cols{ display:flex; gap:10px }
+.rank-cols>div{ flex:1 }
+.rank-cols h4{
+  margin:0 0 4px;
+  color:var(--muted);
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.rank-cols ol{
+  margin:0; padding-left:18px;
+  max-height:260px; overflow:auto;
+}
+.rank-cols li small{color:var(--muted)}
+
+.logs-body{
+  margin:0; height:320px;
+  overflow:auto;
+  background:#000; color:#b8ffda;
+  border:1px solid #0b4022;
+  padding:10px; border-radius:6px;
+  font-size:12px;
+}
+.log-line{ white-space:pre; }
+.log-line.error{ color:var(--red); }
+.log-line.warn{ color:var(--yellow); }
+
+.downloads{ display:flex; gap:10px; margin-top:10px }
+.downloads.hidden{ display:none }
+.downloads a{ color:var(--yellow) }
+
+.side .mono{
+  white-space:pre-wrap;
+  font-size:12px; color:#c7ffe6;
+}
+.side ul{
+  max-height:120px; overflow:auto;
+  margin:6px 0 16px 0;
+  padding-left:16px;
+}
+.side li em{color:var(--muted)}
+
+.sessions{ margin:14px }
+.sessions table{
+  width:100%; border-collapse:collapse;
+}
+.sessions th, .sessions td{
+  border-bottom:1px dashed #0b4022;
+  padding:8px; text-align:left;
+}
+.sessions td:nth-child(3){ color:var(--yellow) }
+
+footer{
+  padding:20px; text-align:center;
+  color:#5fa483;
+  font-size:12px;
+}
