@@ -11,10 +11,10 @@ const { db: dbConfig, headless, workerId, cities, force } = workerData;
 // --- Helper Functions ---
 
 function convertDateTime(dateTimeStr) {
-  if (!dateTimeStr || !dateTimeStr.includes('/')) return null;
-  const parts = dateTimeStr.match(/(\d{2})\/(\d{2})\/(\d{4})\s*(\d{2}):(\d{2})/);
-  if (!parts) return null;
-  return `${parts[3]}-${parts[2]}-${parts[1]} ${parts[4]}:${parts[5]}:00`;
+  if (!dateTimeStr) return null;
+  // Try parsing strictly with DD/MM/YYYY HH:mm
+  const d = dayjs(dateTimeStr, 'DD/MM/YYYY HH:mm', true);
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:00') : null;
 }
 
 function parseCurrency(val) {
@@ -93,6 +93,7 @@ async function extractItems(page, licitacaoId) {
                 rowData.push(text);
             }
 
+            // Map columns (standard layout):
             items.push({
                 licitacao_id: licitacaoId,
                 item: rowData[0] || '',
@@ -107,17 +108,16 @@ async function extractItems(page, licitacaoId) {
             });
         }
     } catch (e) {
-         // console.error('Error extracting items:', e);
+         // console.error('Error items:', e);
     }
     return items;
 }
 
 /**
- * Scrape the main grid from DOM.
- * Returns array of objects with raw data and element handles.
+ * Scrape the main grid from DOM with dynamic column detection.
  */
 async function scrapeMainGrid(page) {
-    // Wait for rows
+    // Wait for rows (at least one)
     try {
         await page.waitForSelector('.x-grid-row', { timeout: 30000 });
     } catch(e) {
@@ -128,28 +128,68 @@ async function scrapeMainGrid(page) {
     const scrapedData = [];
 
     for (const row of rows) {
-        // Extract cell texts
         const texts = await row.evaluate(el => {
             const cells = Array.from(el.querySelectorAll('.x-grid-cell'));
             return cells.map(c => c.innerText.trim());
         });
 
-        // Map based on visual indices found:
-        // 3: Processo, 4: Orgao, 5: Status, 6: Data, 7: Objeto, 9: Modalidade
-        // Note: Indices might shift if hidden columns exist, but innerText usually respects DOM order.
-        // We will assume the standard order found in Botucatu/Jahu/Jaborandi headers.
+        // Filter out empty/grouping rows (usually just 1-2 cells)
+        if (texts.length < 5) continue;
 
-        if (texts.length > 9) {
-            scrapedData.push({
-                processo: texts[3],
-                orgao: texts[4],
-                status: texts[5],
-                dataStr: texts[6],
-                objeto: texts[7],
-                modalidade: texts[9],
-                element: row, // Keep handle for clicking
-                fullText: texts.join(' ') // for fallback matching
-            });
+        // Dynamic Column Mapping Logic
+        // Find Date: Regex matches DD/MM/YYYY HH:mm
+        const dateIndex = texts.findIndex(t => /\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}/.test(t));
+
+        let processoIndex = -1;
+        let orgaoIndex = -1;
+        let objetoIndex = -1;
+        let statusIndex = -1;
+        let modalidadeIndex = -1;
+
+        if (dateIndex !== -1) {
+             // Standard Jaborandi/Botucatu layout relative to Date
+             // Jaborandi: [3]Processo [4]Orgao [5]Status [6]Date [7]Objeto ... [9]Modalidade
+             // Date is at 6.
+             // Processo is Date - 3
+             // Orgao is Date - 2
+             // Status is Date - 1
+             // Objeto is Date + 1
+             // Modalidade is Date + 3
+
+             processoIndex = dateIndex - 3;
+             orgaoIndex = dateIndex - 2;
+             statusIndex = dateIndex - 1;
+             objetoIndex = dateIndex + 1;
+             modalidadeIndex = dateIndex + 3; // or search for text "PREGÃO", "CONCORRÊNCIA"
+
+             // Fallback for Modalidade if index out of bounds or empty
+             if (!texts[modalidadeIndex]) {
+                 modalidadeIndex = texts.findIndex(t =>
+                    t.toUpperCase().includes('PREGÃO') ||
+                    t.toUpperCase().includes('CONCORRÊNCIA') ||
+                    t.toUpperCase().includes('DISPENSA')
+                 );
+             }
+        } else {
+             // Fallback: try to find by content
+             processoIndex = texts.findIndex(t => /^\d+\/\d+$/.test(t) || /^\d{6}\/\d{2}$/.test(t));
+             if (processoIndex === -1) processoIndex = 3; // Default
+        }
+
+        const bid = {
+            processo: texts[processoIndex],
+            orgao: texts[orgaoIndex],
+            status: texts[statusIndex],
+            dataStr: texts[dateIndex],
+            objeto: texts[objetoIndex],
+            modalidade: texts[modalidadeIndex],
+            element: row,
+            fullText: texts.join(' ')
+        };
+
+        // Final sanity check
+        if (bid.processo && bid.dataStr) {
+             scrapedData.push(bid);
         }
     }
     return scrapedData;
@@ -172,10 +212,9 @@ async function processCity(connection, page, city) {
             if (link) link.click();
         });
 
-        // Wait for data load (network idle is usually enough, but we wait for selector in scrape)
+        // Wait for data load
         await new Promise(r => setTimeout(r, 5000));
 
-        // Scrape from DOM
         const rows = await scrapeMainGrid(page);
 
         const now = dayjs();
@@ -183,8 +222,6 @@ async function processCity(connection, page, city) {
         const basicValues = [];
 
         for (const bid of rows) {
-            if (!bid.processo || !bid.orgao) continue;
-
             const id = `${bid.orgao}-${bid.processo}`;
             const dataFinal = convertDateTime(bid.dataStr);
 
@@ -224,22 +261,14 @@ async function processCity(connection, page, city) {
         let newItemsCount = 0;
 
         for (const target of bidsToExplore) {
-            // Click the row using the handle we saved
-            // We need to check if the element is still valid (not detached)
-            // If detached (re-render), we need to find it again.
-
             let handle = target.element;
             const isConnected = await handle.evaluate(el => el.isConnected);
 
             if (!isConnected) {
-                // Try to find it again by ID logic (Processo)
-                // This assumes unique process numbers in the view
                  const freshRows = await page.$$('.x-grid-row');
                  for (const r of freshRows) {
                      const txt = await r.evaluate(el => el.innerText);
-                     // extract process number again from text to match?
-                     // Easier: just match loosely
-                     if (txt.includes(target.id.split('-')[1])) {
+                     if (txt.includes(target.id.split('-')[1])) { // Match process number part
                          handle = r;
                          break;
                      }
@@ -250,13 +279,12 @@ async function processCity(connection, page, city) {
                 try {
                     await handle.click({ count: 2 });
                 } catch (clickErr) {
-                    // console.log('Click failed', clickErr);
                     continue;
                 }
 
                 await new Promise(r => setTimeout(r, 4000));
 
-                // 1. Extract "Objeto"
+                // 1. Objeto
                 await clickTab(page, 'Objeto');
                 await new Promise(r => setTimeout(r, 1000));
                 const fullObjeto = await extractObjetoFull(page);
@@ -267,7 +295,7 @@ async function processCity(connection, page, city) {
                     );
                 }
 
-                // 2. Extract "Informações"
+                // 2. Informações
                 const infoTabClicked = await clickTab(page, 'Informações');
                 if (infoTabClicked) {
                     await new Promise(r => setTimeout(r, 2000));
@@ -288,7 +316,7 @@ async function processCity(connection, page, city) {
                     );
                 }
 
-                // 3. Extract "Itens"
+                // 3. Itens
                 const itemsTabClicked = await clickTab(page, 'Itens');
                 if (itemsTabClicked) {
                     await new Promise(r => setTimeout(r, 2000));
@@ -308,7 +336,7 @@ async function processCity(connection, page, city) {
                     }
                 }
 
-                // Close window
+                // Close
                 await page.evaluate(() => {
                     const buttons = Array.from(document.querySelectorAll('.x-btn-inner'));
                     const close = buttons.find(b => b.innerText.includes('Voltar') || b.innerText.includes('Fechar'));
