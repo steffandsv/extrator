@@ -38,13 +38,14 @@ function msToMinSec(ms) {
 
 // ---------- Sessão de Execução ----------
 class RunSession extends EventEmitter {
-  constructor({ db, headless = true, workers = Math.max(4, Math.floor((os.cpus().length || 8) / 2)), whereClause = '', label = '' }) {
+  constructor({ db, headless = true, workers = Math.max(4, Math.floor((os.cpus().length || 8) / 2)), whereClause = '', label = '', force = false }) {
     super();
     this.db = db;
     this.headless = headless;
     this.workers = workers;
     this.whereClause = whereClause || '';
     this.label = label || (whereClause ? `WHERE: ${whereClause}` : 'TODAS as cidades');
+    this.force = force;
 
     this.id = `sess-${dayjs().format('YYYYMMDD-HHmmss')}-${Math.random().toString(36).slice(2, 6)}`;
     this.startedAt = new Date();
@@ -105,6 +106,7 @@ class RunSession extends EventEmitter {
             headless: this.headless,
             workerId: idx + 1,
             cities: citiesChunk,
+            force: this.force
           },
         });
 
