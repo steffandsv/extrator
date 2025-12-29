@@ -108,16 +108,18 @@ function clearSessionUI() {
 }
 
 // ------- ações -------
-async function startRun(type) {
+async function startRun(type, force = false) {
   try {
-    const where = type === 'where' ? $('#whereInput').value : '';
+    const where = $('#whereInput').value;
+    const body = { type, where, force };
     const resp = await api('/api/run', {
       method: 'POST',
-      body: JSON.stringify({ type, where }),
+      body: JSON.stringify(body),
     });
     currentSessionId = resp.sessionId;
     clearSessionUI();
-    appendPrettyLog(JSON.stringify({ ts: new Date().toISOString(), level: 'info', msg: `Iniciada sessão ${resp.sessionId} — ${resp.label}` }));
+    const lbl = force ? `FORÇADA (${resp.label})` : resp.label;
+    appendPrettyLog(JSON.stringify({ ts: new Date().toISOString(), level: 'info', msg: `Iniciada sessão ${resp.sessionId} — ${lbl}` }));
   } catch (e) {
     appendPrettyLog(JSON.stringify({ ts: new Date().toISOString(), level: 'error', msg: `Falha ao iniciar: ${e.message}` }));
   }
@@ -125,6 +127,11 @@ async function startRun(type) {
 
 $('#btnAll').onclick = () => startRun('all');
 $('#btnWhere').onclick = () => startRun('where');
+$('#btnForce').onclick = () => {
+    if(confirm('Tem certeza? Isso irá reprocessar TODAS as licitações encontradas pelo filtro WHERE, ignorando a data, e extraindo itens novamente. Isso pode demorar.')) {
+        startRun('where', true);
+    }
+};
 
 $('#btnLast').onclick = async () => {
   try {

@@ -49,7 +49,7 @@ app.get('/api/sessions', auth, (req, res) => {
 });
 
 app.post('/api/run', auth, async (req, res) => {
-  const { type, where } = req.body || {};
+  const { type, where, force } = req.body || {};
   if (!['all', 'where'].includes(type)) return res.status(400).json({ error: 'type must be all|where' });
 
   const whereClause = type === 'all' ? '' : (where || '');
@@ -57,7 +57,7 @@ app.post('/api/run', auth, async (req, res) => {
 
   const session = createRunSession({
     db: DB, headless: HEADLESS, workers: WORKERS,
-    whereClause, label,
+    whereClause, label, force: !!force
   });
 
   sessions.set(session.id, session);

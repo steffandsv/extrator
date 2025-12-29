@@ -6,7 +6,7 @@ const dayjs = require('dayjs');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
 dayjs.extend(customParseFormat);
 
-const { db: dbConfig, headless, workerId, cities } = workerData;
+const { db: dbConfig, headless, workerId, cities, force } = workerData;
 
 // --- Helper Functions ---
 
@@ -50,14 +50,10 @@ async function clickTab(page, tabName) {
 async function extractInformacoes(page) {
     return page.evaluate(() => {
         const info = {};
-        // Scope to the detail window/tab if possible, but finding all visible labels is mostly safe here
-        // as ExtJS hides the background content.
-        // We will look for labels inside the likely detail container (x-window-body or active tab)
-        // For robustness, getting all visible labels is a good heuristic.
         const labels = Array.from(document.querySelectorAll('label.x-form-item-label'));
 
         labels.forEach(label => {
-            if (!label.offsetParent) return; // Skip hidden labels
+            if (!label.offsetParent) return;
 
             const labelText = label.innerText.replace(':', '').trim();
             const itemWrapper = label.closest('.x-form-item');
@@ -78,11 +74,9 @@ async function extractInformacoes(page) {
  */
 async function extractObjetoFull(page) {
     return page.evaluate(() => {
-        // Look for the main textarea in the visible tab
         const textareas = Array.from(document.querySelectorAll('textarea'));
-        // Find the one that looks like the object description (often the largest or only one visible)
         for (const ta of textareas) {
-            if (ta.offsetParent !== null) { // visible
+            if (ta.offsetParent !== null) {
                  return ta.value || ta.innerText;
             }
         }
@@ -98,29 +92,12 @@ async function extractItems(page, licitacaoId) {
     try {
         await new Promise(r => setTimeout(r, 2000));
 
-        // CRITICAL FIX: Scope selectors to the modal window or active tab to avoid scraping background grid.
-        // Detail windows in ExtJS usually have class 'x-window' or 'x-window-default'.
-        // We select rows that are descendants of the active window/tab.
-        // A reliable heuristic is "rows that are visibly rendered on top".
-        // Or finding the grid container inside the active tab.
-
-        // We will filter by visibility and z-index context effectively by checking visibility deeply.
-        // ExtJS masks the background, but elements might still return "visible".
-        // However, the items grid is in the active tab.
-
-        // Better selector: .x-window .x-grid-row (assuming detail is a window)
-        // If it's a tab in the main layout, scoping to the tab content is better.
-        // Based on user input: "tabela com classe similar a 'x-panel x-abs-layout-item x-panel-default x-grid x-grid-actionable'"
-
         const rows = await page.$$('.x-window .x-grid-row');
-        // Fallback if detail is not a popup window but a main tab replacement
         const fallbackRows = rows.length ? rows : await page.$$('.x-tabpanel-child[aria-hidden=false] .x-grid-row');
-
-        const targetRows = fallbackRows.length > 0 ? fallbackRows : await page.$$('.x-grid-row'); // Last resort
+        const targetRows = fallbackRows.length > 0 ? fallbackRows : await page.$$('.x-grid-row');
 
         for (const row of targetRows) {
             const isVisible = await row.evaluate(el => {
-                // Check if element is visible and inside a visible container
                 const style = window.getComputedStyle(el);
                 return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
             });
@@ -134,9 +111,6 @@ async function extractItems(page, licitacaoId) {
                 const text = await cell.evaluate(el => el.innerText.trim());
                 rowData.push(text);
             }
-
-            // Map columns assuming standard layout:
-            // [0]=Item, [1]=Cod, [2]=Desc, [3]=Unid, [4]=Qtde, [5]=VlrMedio, [6]=VlrTotal, [7]=Lote
 
             items.push({
                 licitacao_id: licitacaoId,
@@ -197,12 +171,21 @@ async function processCity(connection, page, city) {
             const dataFinalStr = bid[8]; // Dt. Realização
             const dataFinal = convertDateTime(dataFinalStr);
 
-            // Identify Future/Open Bids
-            if (dataFinal) {
+            // Check if we should explore details
+            let shouldExplore = false;
+            if (force) {
+                // Force update: explore everything
+                shouldExplore = true;
+            } else if (dataFinal) {
+                // Standard update: explore future bids
                 const d = dayjs(dataFinal);
                 if (d.isAfter(now)) {
-                    bidsToExplore.push({ id, procNum: bid[3] });
+                    shouldExplore = true;
                 }
+            }
+
+            if (shouldExplore) {
+                bidsToExplore.push({ id, procNum: bid[3] });
             }
 
             basicValues.push([
@@ -224,15 +207,12 @@ async function processCity(connection, page, city) {
             await connection.query(query, [basicValues]);
         }
 
-        // Process Details for Future Bids
+        // Process Details
         let newItemsCount = 0;
 
         for (const target of bidsToExplore) {
             // Find row by process number and double click
-            // Use specific row selector if possible to avoid hitting background rows if detail window is open
-            // but here we are back at the main list state.
             const clicked = await page.evaluate((procNum) => {
-                 // Try to find only in the main grid body, usually ID starting with 'gridview'
                  const rows = Array.from(document.querySelectorAll('.x-grid-row'));
                  const targetRow = rows.find(r => r.innerText.includes(procNum));
                  if (targetRow) {
@@ -268,7 +248,6 @@ async function processCity(connection, page, city) {
                 await new Promise(r => setTimeout(r, 2000));
                 const infoData = await extractInformacoes(page);
 
-                // Update `licitacoes` with info
                 const updateData = [
                     infoData['Período de lançamento da proposta'] || infoData['Período de lançamento'] || null,
                     infoData['Modo de Disputa'] || null,
@@ -296,7 +275,6 @@ async function processCity(connection, page, city) {
                         i.licitacao_id, i.item, i.codigo, i.descricao, i.unidade, i.quantidade, i.valor_medio, i.valor_total, i.lote
                     ]);
 
-                    // Replace items
                     await connection.query('DELETE FROM licitacao_itens WHERE licitacao_id = ?', [target.id]);
                     await connection.query(
                         `INSERT INTO licitacao_itens (licitacao_id, item, codigo, descricao, unidade, quantidade, valor_medio, valor_total, lote) VALUES ?`,
@@ -305,7 +283,7 @@ async function processCity(connection, page, city) {
                 }
             }
 
-            // Close Detail Window ("Fechar" or "Voltar")
+            // Close Detail Window
             await page.evaluate(() => {
                 const buttons = Array.from(document.querySelectorAll('.x-btn-inner'));
                 const close = buttons.find(b => b.innerText.includes('Voltar') || b.innerText.includes('Fechar'));
