@@ -10,9 +10,6 @@ const { db: dbConfig, headless, workerId, cities, force } = workerData;
 
 // --- Helper Functions ---
 
-/**
- * Converte 'dd/mm/yyyy hh:mi' -> 'yyyy-mm-dd hh:mi:ss'
- */
 function convertDateTime(dateTimeStr) {
   if (!dateTimeStr || !dateTimeStr.includes('/')) return null;
   const parts = dateTimeStr.match(/(\d{2})\/(\d{2})\/(\d{4})\s*(\d{2}):(\d{2})/);
@@ -22,19 +19,14 @@ function convertDateTime(dateTimeStr) {
 
 function parseCurrency(val) {
     if (typeof val !== 'string') return 0;
-    // R$ 1.234,56 -> 1234.56
     let s = val.replace('R$', '').trim();
     s = s.replace(/\./g, '').replace(',', '.');
     const n = parseFloat(s);
     return isNaN(n) ? 0 : n;
 }
 
-/**
- * Helper to click a tab by its text content
- */
 async function clickTab(page, tabName) {
     return page.evaluate((name) => {
-        // Look for the inner text in standard tab structure
         const tabs = Array.from(document.querySelectorAll('.x-tab-inner'));
         const target = tabs.find(t => t.innerText.trim().includes(name));
         if (target) {
@@ -45,18 +37,12 @@ async function clickTab(page, tabName) {
     }, tabName);
 }
 
-/**
- * Extract data from the "Informações" tab (KeyValue pairs)
- */
 async function extractInformacoes(page) {
     return page.evaluate(() => {
         const info = {};
-        // Find visible labels in the active form context
         const labels = Array.from(document.querySelectorAll('label.x-form-item-label'));
-
         labels.forEach(label => {
-            if (!label.offsetParent) return; // Skip hidden labels
-
+            if (!label.offsetParent) return;
             const labelText = label.innerText.replace(':', '').trim();
             const itemWrapper = label.closest('.x-form-item');
             if (itemWrapper) {
@@ -71,9 +57,6 @@ async function extractInformacoes(page) {
     });
 }
 
-/**
- * Extract full text from "Objeto" tab (usually a textarea)
- */
 async function extractObjetoFull(page) {
     return page.evaluate(() => {
         const textareas = Array.from(document.querySelectorAll('textarea'));
@@ -86,23 +69,15 @@ async function extractObjetoFull(page) {
     });
 }
 
-/**
- * Extract Items from the "Itens" tab grid
- */
 async function extractItems(page, licitacaoId) {
     const items = [];
     try {
         await new Promise(r => setTimeout(r, 2000));
-
-        // Target grid rows in the active window (detail view)
-        // If ExtJS opens a window, it will likely be .x-window.
-        // If it replaces the center pane, it might be in a specific panel.
-        // We prioritize rows inside a window, then fallback to visible rows.
-
         const rows = await page.$$('.x-window .x-grid-row');
-        const fallbackRows = rows.length ? rows : await page.$$('.x-grid-row');
+        const fallbackRows = rows.length ? rows : await page.$$('.x-tabpanel-child[aria-hidden=false] .x-grid-row');
+        const targetRows = fallbackRows.length > 0 ? fallbackRows : await page.$$('.x-grid-row');
 
-        for (const row of fallbackRows) {
+        for (const row of targetRows) {
             const isVisible = await row.evaluate(el => {
                 const style = window.getComputedStyle(el);
                 return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
@@ -118,9 +93,6 @@ async function extractItems(page, licitacaoId) {
                 rowData.push(text);
             }
 
-            // Heuristic mapping
-            // [0]=Item, [1]=Cod, [2]=Desc, [3]=Unid, [4]=Qtde, [5]=VlrMedio, [6]=VlrTotal, [7]=Lote
-
             items.push({
                 licitacao_id: licitacaoId,
                 item: rowData[0] || '',
@@ -135,14 +107,55 @@ async function extractItems(page, licitacaoId) {
             });
         }
     } catch (e) {
-        // console.error('Error items:', e);
+         // console.error('Error extracting items:', e);
     }
     return items;
 }
 
 /**
- * Main process for a city
+ * Scrape the main grid from DOM.
+ * Returns array of objects with raw data and element handles.
  */
+async function scrapeMainGrid(page) {
+    // Wait for rows
+    try {
+        await page.waitForSelector('.x-grid-row', { timeout: 30000 });
+    } catch(e) {
+        return [];
+    }
+
+    const rows = await page.$$('.x-grid-row');
+    const scrapedData = [];
+
+    for (const row of rows) {
+        // Extract cell texts
+        const texts = await row.evaluate(el => {
+            const cells = Array.from(el.querySelectorAll('.x-grid-cell'));
+            return cells.map(c => c.innerText.trim());
+        });
+
+        // Map based on visual indices found:
+        // 3: Processo, 4: Orgao, 5: Status, 6: Data, 7: Objeto, 9: Modalidade
+        // Note: Indices might shift if hidden columns exist, but innerText usually respects DOM order.
+        // We will assume the standard order found in Botucatu/Jahu/Jaborandi headers.
+
+        if (texts.length > 9) {
+            scrapedData.push({
+                processo: texts[3],
+                orgao: texts[4],
+                status: texts[5],
+                dataStr: texts[6],
+                objeto: texts[7],
+                modalidade: texts[9],
+                element: row, // Keep handle for clicking
+                fullText: texts.join(' ') // for fallback matching
+            });
+        }
+    }
+    return scrapedData;
+}
+
+
 async function processCity(connection, page, city) {
     try {
         await page.goto(`${city.DS_DOMAIN}/comprasedital`, { waitUntil: 'networkidle2', timeout: 60000 });
@@ -159,43 +172,23 @@ async function processCity(connection, page, city) {
             if (link) link.click();
         });
 
-        // Wait for main grid
-        const response = await page.waitForResponse(
-            r => r.url().includes('Evt=data') && r.status() === 200,
-            { timeout: 30000 }
-        );
-        const json = await response.json();
-        const rows = json.rows || [];
+        // Wait for data load (network idle is usually enough, but we wait for selector in scrape)
+        await new Promise(r => setTimeout(r, 5000));
+
+        // Scrape from DOM
+        const rows = await scrapeMainGrid(page);
 
         const now = dayjs();
         const bidsToExplore = [];
         const basicValues = [];
 
-        // Identify bids to process
         for (const bid of rows) {
-            // Check indices based on debug output:
-            // 3: Processo ("023416/25")
-            // 4: Orgao ("PREFEITURA...")
-            // 6: Data ("26/09/2025 08:01") - Note: debug said index 6! Not 8.
-            // 7: Objeto
-            // 9: Modalidade
+            if (!bid.processo || !bid.orgao) continue;
 
-            if (!bid || !bid[4] || !bid[3]) continue;
-
-            const id = `${bid[4]}-${bid[3]}`;
-
-            // Adjust index for date. In debug sample it was index 6.
-            // Previous code assumed 8. Let's try 6, fallback to 8 if needed or regex.
-            let dataFinalStr = bid[6];
-            // Sanity check: is it a date?
-            if (!dataFinalStr || !dataFinalStr.includes('/')) {
-                dataFinalStr = bid[8]; // Try old index
-            }
-
-            const dataFinal = convertDateTime(dataFinalStr);
+            const id = `${bid.orgao}-${bid.processo}`;
+            const dataFinal = convertDateTime(bid.dataStr);
 
             let shouldExplore = false;
-
             if (force) {
                 shouldExplore = true;
             } else if (dataFinal) {
@@ -206,14 +199,11 @@ async function processCity(connection, page, city) {
             }
 
             if (shouldExplore) {
-                bidsToExplore.push({ id, procNum: bid[3] });
+                bidsToExplore.push({ id, element: bid.element });
             }
 
-            // Insert basic data
-            // Schema expects: id, cd_ibge, numero_processo, orgao, status, data_final, objeto, modalidade
-            // From sample: 3=Processo, 4=Orgao, 5=Status, 6=Data, 7=Objeto, 9=Modalidade
             basicValues.push([
-                id, city.CD_IBGE, bid[3], bid[4], bid[5], dataFinal, bid[7], bid[9]
+                id, city.CD_IBGE, bid.processo, bid.orgao, bid.status, dataFinal, bid.objeto, bid.modalidade
             ]);
         }
 
@@ -231,89 +221,101 @@ async function processCity(connection, page, city) {
             await connection.query(query, [basicValues]);
         }
 
-        // Deep Dive
         let newItemsCount = 0;
 
         for (const target of bidsToExplore) {
-            const clicked = await page.evaluate((procNum) => {
-                 const rows = Array.from(document.querySelectorAll('.x-grid-row'));
-                 // Try to match process number in text
-                 const targetRow = rows.find(r => r.innerText.includes(procNum));
-                 if (targetRow) {
-                     const event = new MouseEvent('dblclick', {
-                        'view': window,
-                        'bubbles': true,
-                        'cancelable': true
-                     });
-                     targetRow.dispatchEvent(event);
-                     return true;
+            // Click the row using the handle we saved
+            // We need to check if the element is still valid (not detached)
+            // If detached (re-render), we need to find it again.
+
+            let handle = target.element;
+            const isConnected = await handle.evaluate(el => el.isConnected);
+
+            if (!isConnected) {
+                // Try to find it again by ID logic (Processo)
+                // This assumes unique process numbers in the view
+                 const freshRows = await page.$$('.x-grid-row');
+                 for (const r of freshRows) {
+                     const txt = await r.evaluate(el => el.innerText);
+                     // extract process number again from text to match?
+                     // Easier: just match loosely
+                     if (txt.includes(target.id.split('-')[1])) {
+                         handle = r;
+                         break;
+                     }
                  }
-                 return false;
-            }, target.procNum);
-
-            if (!clicked) continue;
-
-            await new Promise(r => setTimeout(r, 4000));
-
-            // 1. Objeto Tab
-            await clickTab(page, 'Objeto');
-            await new Promise(r => setTimeout(r, 1000));
-            const fullObjeto = await extractObjetoFull(page);
-            if (fullObjeto) {
-                await connection.query(
-                    `UPDATE licitacoes SET objeto=? WHERE id=?`,
-                    [fullObjeto, target.id]
-                );
             }
 
-            // 2. Informações Tab
-            const infoTabClicked = await clickTab(page, 'Informações');
-            if (infoTabClicked) {
-                await new Promise(r => setTimeout(r, 2000));
-                const infoData = await extractInformacoes(page);
+            if (handle) {
+                try {
+                    await handle.click({ count: 2 });
+                } catch (clickErr) {
+                    // console.log('Click failed', clickErr);
+                    continue;
+                }
 
-                const updateData = [
-                    infoData['Período de lançamento da proposta'] || infoData['Período de lançamento'] || null,
-                    infoData['Modo de Disputa'] || null,
-                    parseCurrency(infoData['Valor Previsto'] || '0'),
-                    infoData['Registro de Preços'] === 'Sim' ? 1 : 0,
-                    infoData['Obra'] === 'Sim' ? 1 : 0,
-                    target.id
-                ];
+                await new Promise(r => setTimeout(r, 4000));
 
-                await connection.query(
-                    `UPDATE licitacoes SET periodo_lancamento=?, modo_disputa=?, valor_previsto=?, registro_precos=?, obra=? WHERE id=?`,
-                    updateData
-                );
-            }
-
-            // 3. Itens Tab
-            const itemsTabClicked = await clickTab(page, 'Itens');
-            if (itemsTabClicked) {
-                await new Promise(r => setTimeout(r, 2000));
-                const items = await extractItems(page, target.id);
-
-                if (items.length > 0) {
-                    newItemsCount += items.length;
-                    const itemValues = items.map(i => [
-                        i.licitacao_id, i.item, i.codigo, i.descricao, i.unidade, i.quantidade, i.valor_medio, i.valor_total, i.lote
-                    ]);
-
-                    await connection.query('DELETE FROM licitacao_itens WHERE licitacao_id = ?', [target.id]);
+                // 1. Extract "Objeto"
+                await clickTab(page, 'Objeto');
+                await new Promise(r => setTimeout(r, 1000));
+                const fullObjeto = await extractObjetoFull(page);
+                if (fullObjeto) {
                     await connection.query(
-                        `INSERT INTO licitacao_itens (licitacao_id, item, codigo, descricao, unidade, quantidade, valor_medio, valor_total, lote) VALUES ?`,
-                        [itemValues]
+                        `UPDATE licitacoes SET objeto=? WHERE id=?`,
+                        [fullObjeto, target.id]
                     );
                 }
-            }
 
-            // Close (Voltar/Fechar)
-            await page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('.x-btn-inner'));
-                const close = buttons.find(b => b.innerText.includes('Voltar') || b.innerText.includes('Fechar'));
-                if (close) close.click();
-            });
-            await new Promise(r => setTimeout(r, 1500));
+                // 2. Extract "Informações"
+                const infoTabClicked = await clickTab(page, 'Informações');
+                if (infoTabClicked) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    const infoData = await extractInformacoes(page);
+
+                    const updateData = [
+                        infoData['Período de lançamento da proposta'] || infoData['Período de lançamento'] || null,
+                        infoData['Modo de Disputa'] || null,
+                        parseCurrency(infoData['Valor Previsto'] || '0'),
+                        infoData['Registro de Preços'] === 'Sim' ? 1 : 0,
+                        infoData['Obra'] === 'Sim' ? 1 : 0,
+                        target.id
+                    ];
+
+                    await connection.query(
+                        `UPDATE licitacoes SET periodo_lancamento=?, modo_disputa=?, valor_previsto=?, registro_precos=?, obra=? WHERE id=?`,
+                        updateData
+                    );
+                }
+
+                // 3. Extract "Itens"
+                const itemsTabClicked = await clickTab(page, 'Itens');
+                if (itemsTabClicked) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    const items = await extractItems(page, target.id);
+
+                    if (items.length > 0) {
+                        newItemsCount += items.length;
+                        const itemValues = items.map(i => [
+                            i.licitacao_id, i.item, i.codigo, i.descricao, i.unidade, i.quantidade, i.valor_medio, i.valor_total, i.lote
+                        ]);
+
+                        await connection.query('DELETE FROM licitacao_itens WHERE licitacao_id = ?', [target.id]);
+                        await connection.query(
+                            `INSERT INTO licitacao_itens (licitacao_id, item, codigo, descricao, unidade, quantidade, valor_medio, valor_total, lote) VALUES ?`,
+                            [itemValues]
+                        );
+                    }
+                }
+
+                // Close window
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('.x-btn-inner'));
+                    const close = buttons.find(b => b.innerText.includes('Voltar') || b.innerText.includes('Fechar'));
+                    if (close) close.click();
+                });
+                await new Promise(r => setTimeout(r, 1500));
+            }
         }
 
         return { found: rows.length, newCount: newItemsCount, updatedCount: bidsToExplore.length };
