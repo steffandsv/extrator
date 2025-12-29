@@ -34,6 +34,7 @@ function parseCurrency(val) {
  */
 async function clickTab(page, tabName) {
     return page.evaluate((name) => {
+        // Look for the inner text in standard tab structure
         const tabs = Array.from(document.querySelectorAll('.x-tab-inner'));
         const target = tabs.find(t => t.innerText.trim().includes(name));
         if (target) {
@@ -50,10 +51,11 @@ async function clickTab(page, tabName) {
 async function extractInformacoes(page) {
     return page.evaluate(() => {
         const info = {};
+        // Find visible labels in the active form context
         const labels = Array.from(document.querySelectorAll('label.x-form-item-label'));
 
         labels.forEach(label => {
-            if (!label.offsetParent) return;
+            if (!label.offsetParent) return; // Skip hidden labels
 
             const labelText = label.innerText.replace(':', '').trim();
             const itemWrapper = label.closest('.x-form-item');
@@ -92,11 +94,15 @@ async function extractItems(page, licitacaoId) {
     try {
         await new Promise(r => setTimeout(r, 2000));
 
-        const rows = await page.$$('.x-window .x-grid-row');
-        const fallbackRows = rows.length ? rows : await page.$$('.x-tabpanel-child[aria-hidden=false] .x-grid-row');
-        const targetRows = fallbackRows.length > 0 ? fallbackRows : await page.$$('.x-grid-row');
+        // Target grid rows in the active window (detail view)
+        // If ExtJS opens a window, it will likely be .x-window.
+        // If it replaces the center pane, it might be in a specific panel.
+        // We prioritize rows inside a window, then fallback to visible rows.
 
-        for (const row of targetRows) {
+        const rows = await page.$$('.x-window .x-grid-row');
+        const fallbackRows = rows.length ? rows : await page.$$('.x-grid-row');
+
+        for (const row of fallbackRows) {
             const isVisible = await row.evaluate(el => {
                 const style = window.getComputedStyle(el);
                 return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
@@ -112,6 +118,9 @@ async function extractItems(page, licitacaoId) {
                 rowData.push(text);
             }
 
+            // Heuristic mapping
+            // [0]=Item, [1]=Cod, [2]=Desc, [3]=Unid, [4]=Qtde, [5]=VlrMedio, [6]=VlrTotal, [7]=Lote
+
             items.push({
                 licitacao_id: licitacaoId,
                 item: rowData[0] || '',
@@ -126,7 +135,7 @@ async function extractItems(page, licitacaoId) {
             });
         }
     } catch (e) {
-        // console.error('Error extracting items:', e);
+        // console.error('Error items:', e);
     }
     return items;
 }
@@ -138,7 +147,6 @@ async function processCity(connection, page, city) {
     try {
         await page.goto(`${city.DS_DOMAIN}/comprasedital`, { waitUntil: 'networkidle2', timeout: 60000 });
 
-        // Navigate: Público -> Licitação Eletrônica
         await page.evaluate(() => {
             const links = Array.from(document.querySelectorAll('a'));
             const publico = links.find(el => el.textContent.includes('03. Público'));
@@ -151,7 +159,7 @@ async function processCity(connection, page, city) {
             if (link) link.click();
         });
 
-        // Wait for data
+        // Wait for main grid
         const response = await page.waitForResponse(
             r => r.url().includes('Evt=data') && r.status() === 200,
             { timeout: 30000 }
@@ -159,25 +167,38 @@ async function processCity(connection, page, city) {
         const json = await response.json();
         const rows = json.rows || [];
 
-        // Save Basic Info
         const now = dayjs();
         const bidsToExplore = [];
         const basicValues = [];
 
+        // Identify bids to process
         for (const bid of rows) {
+            // Check indices based on debug output:
+            // 3: Processo ("023416/25")
+            // 4: Orgao ("PREFEITURA...")
+            // 6: Data ("26/09/2025 08:01") - Note: debug said index 6! Not 8.
+            // 7: Objeto
+            // 9: Modalidade
+
             if (!bid || !bid[4] || !bid[3]) continue;
 
             const id = `${bid[4]}-${bid[3]}`;
-            const dataFinalStr = bid[8]; // Dt. Realização
+
+            // Adjust index for date. In debug sample it was index 6.
+            // Previous code assumed 8. Let's try 6, fallback to 8 if needed or regex.
+            let dataFinalStr = bid[6];
+            // Sanity check: is it a date?
+            if (!dataFinalStr || !dataFinalStr.includes('/')) {
+                dataFinalStr = bid[8]; // Try old index
+            }
+
             const dataFinal = convertDateTime(dataFinalStr);
 
-            // Check if we should explore details
             let shouldExplore = false;
+
             if (force) {
-                // Force update: explore everything
                 shouldExplore = true;
             } else if (dataFinal) {
-                // Standard update: explore future bids
                 const d = dayjs(dataFinal);
                 if (d.isAfter(now)) {
                     shouldExplore = true;
@@ -188,6 +209,9 @@ async function processCity(connection, page, city) {
                 bidsToExplore.push({ id, procNum: bid[3] });
             }
 
+            // Insert basic data
+            // Schema expects: id, cd_ibge, numero_processo, orgao, status, data_final, objeto, modalidade
+            // From sample: 3=Processo, 4=Orgao, 5=Status, 6=Data, 7=Objeto, 9=Modalidade
             basicValues.push([
                 id, city.CD_IBGE, bid[3], bid[4], bid[5], dataFinal, bid[7], bid[9]
             ]);
@@ -207,13 +231,13 @@ async function processCity(connection, page, city) {
             await connection.query(query, [basicValues]);
         }
 
-        // Process Details
+        // Deep Dive
         let newItemsCount = 0;
 
         for (const target of bidsToExplore) {
-            // Find row by process number and double click
             const clicked = await page.evaluate((procNum) => {
                  const rows = Array.from(document.querySelectorAll('.x-grid-row'));
+                 // Try to match process number in text
                  const targetRow = rows.find(r => r.innerText.includes(procNum));
                  if (targetRow) {
                      const event = new MouseEvent('dblclick', {
@@ -229,9 +253,9 @@ async function processCity(connection, page, city) {
 
             if (!clicked) continue;
 
-            await new Promise(r => setTimeout(r, 4000)); // Wait for detail window
+            await new Promise(r => setTimeout(r, 4000));
 
-            // 1. Extract "Objeto" Full Description
+            // 1. Objeto Tab
             await clickTab(page, 'Objeto');
             await new Promise(r => setTimeout(r, 1000));
             const fullObjeto = await extractObjetoFull(page);
@@ -242,7 +266,7 @@ async function processCity(connection, page, city) {
                 );
             }
 
-            // 2. Click "Informações" Tab
+            // 2. Informações Tab
             const infoTabClicked = await clickTab(page, 'Informações');
             if (infoTabClicked) {
                 await new Promise(r => setTimeout(r, 2000));
@@ -263,7 +287,7 @@ async function processCity(connection, page, city) {
                 );
             }
 
-            // 3. Click "Itens" Tab
+            // 3. Itens Tab
             const itemsTabClicked = await clickTab(page, 'Itens');
             if (itemsTabClicked) {
                 await new Promise(r => setTimeout(r, 2000));
@@ -283,7 +307,7 @@ async function processCity(connection, page, city) {
                 }
             }
 
-            // Close Detail Window
+            // Close (Voltar/Fechar)
             await page.evaluate(() => {
                 const buttons = Array.from(document.querySelectorAll('.x-btn-inner'));
                 const close = buttons.find(b => b.innerText.includes('Voltar') || b.innerText.includes('Fechar'));
